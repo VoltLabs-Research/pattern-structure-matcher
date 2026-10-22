@@ -20,7 +20,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <map>
+#include <numeric>
 #include <unordered_set>
 
 namespace Volt {
@@ -316,6 +318,39 @@ static void logPatternCatalog(const PatternCatalog& catalog, const Stopwatch& lo
     }
 }
 
+// "fcc 851234 (81.2%)" per matched pattern, most common first, then the unmatched atoms as Other.
+static std::string describeStructureCounts(
+    const PatternCatalog& catalog,
+    const std::vector<int>& patternCounts,
+    std::size_t atomCount,
+    std::size_t matchedAtoms
+){
+    std::vector<int> matchedPatternIds;
+    for(const CompiledPattern& pattern : catalog.patterns()){
+        if(patternCounts[static_cast<std::size_t>(pattern.id)] > 0){
+            matchedPatternIds.push_back(pattern.id);
+        }
+    }
+    std::stable_sort(matchedPatternIds.begin(), matchedPatternIds.end(), [&](int lhs, int rhs){
+        return patternCounts[static_cast<std::size_t>(lhs)] > patternCounts[static_cast<std::size_t>(rhs)];
+    });
+
+    std::string text;
+    const auto appendCount = [&](const std::string& name, std::size_t count){
+        char share[48];
+        std::snprintf(share, sizeof(share), " %zu (%.1f%%)", count, percentOf(count, atomCount));
+        appendListItem(text, name + share);
+    };
+    for(int patternId : matchedPatternIds){
+        appendCount(
+            catalog.patternById(patternId).name,
+            static_cast<std::size_t>(patternCounts[static_cast<std::size_t>(patternId)])
+        );
+    }
+    appendCount("Other", atomCount - matchedAtoms);
+    return text;
+}
+
 PatternStructureMatchingService::PatternStructureMatchingService() = default;
 
 void PatternStructureMatchingService::setLatticeDirectory(std::string latticeDirectory){
@@ -385,10 +420,29 @@ json PatternStructureMatchingService::compute(
         PatternClassifier classifier(catalog);
         classifier.setAtomTypes(frame.types.empty() ? nullptr : &frame.types);
         classifier.setSelectedPatternIds(selectedPatternIds);
+        phaseTimer.restart();
         classifier.classify(analysis);
         selectedPatternIds = classifier.selectedPatternIds();
         atomPatternIds = classifier.atomPatternIds();
         const auto atomDxaStates = classifier.atomDxaStates();
+
+        std::vector<int> patCounts(catalog->patterns().size(), 0);
+        for(int pid : atomPatternIds){
+            if(pid >= 0 && pid < static_cast<int>(patCounts.size())) patCounts[pid]++;
+        }
+        const std::size_t atomCount = context.atomCount();
+        const std::size_t matchedAtoms = std::accumulate(patCounts.begin(), patCounts.end(), std::size_t{0});
+        spdlog::info(
+            "Matched {} of {} atoms ({:.1f}%) in {}",
+            matchedAtoms,
+            atomCount,
+            percentOf(matchedAtoms, atomCount),
+            phaseTimer.elapsed()
+        );
+        spdlog::info("Structure types: {}", describeStructureCounts(*catalog, patCounts, atomCount, matchedAtoms));
+        if(matchedAtoms == 0){
+            spdlog::warn("No atom matched any of the selected patterns");
+        }
 
         if(!selectedPatternIds.empty()){
             const CompiledPattern& referencePattern = catalog->patternById(selectedPatternIds.front());
@@ -422,10 +476,6 @@ json PatternStructureMatchingService::compute(
         }
 
         {
-            std::vector<int> patCounts(catalog->patterns().size(), 0);
-            for(int pid : atomPatternIds){
-                if(pid >= 0 && pid < static_cast<int>(patCounts.size())) patCounts[pid]++;
-            }
             json patListing = json::array();
             for(const CompiledPattern& pattern : catalog->patterns()){
                 const int cnt = patCounts[pattern.id];
