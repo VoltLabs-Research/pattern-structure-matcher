@@ -236,7 +236,12 @@ std::shared_ptr<const std::vector<PatternDxaAtomState>> smoothOrientationFallbac
 }
 
 void recomputeClusterOrientations(StructureAnalysis& analysis, AnalysisContext& context){
-    for(Cluster* cluster : analysis.clusterGraph().clusters()){
+    // Each cluster rescans every atom, so with many clusters this loop can run for seconds.
+    const auto& clusters = analysis.clusterGraph().clusters();
+    ProgressReporter progress("Recomputing cluster orientations", clusters.size());
+    std::uint64_t visitedClusters = 0;
+    for(Cluster* cluster : clusters){
+        progress.update(++visitedClusters);
         if(!cluster || cluster->id == 0 || cluster->structure == LATTICE_OTHER){
             continue;
         }
@@ -351,6 +356,26 @@ static std::string describeStructureCounts(
     return text;
 }
 
+static void logClusterSummary(const StructureAnalysis& analysis, bool dissolveSmallClusters, const Stopwatch& clusterTimer){
+    const auto& clusters = analysis.clusterGraph().clusters();
+    // The cluster graph always holds the null cluster 0.
+    const std::size_t clusterCount = clusters.empty() ? 0 : clusters.size() - 1;
+    if(dissolveSmallClusters){
+        const auto dissolvedClusters = std::count_if(clusters.begin(), clusters.end(), [](const Cluster* cluster){
+            return cluster && cluster->id != 0 && cluster->structure == LATTICE_OTHER;
+        });
+        spdlog::info(
+            "Built {} clusters in {} ({} with fewer than {} atoms dissolved)",
+            clusterCount,
+            clusterTimer.elapsed(),
+            dissolvedClusters,
+            ClusterBuilder::kDefaultSmallClusterSize
+        );
+    }else{
+        spdlog::info("Built {} clusters in {}", clusterCount, clusterTimer.elapsed());
+    }
+}
+
 PatternStructureMatchingService::PatternStructureMatchingService() = default;
 
 void PatternStructureMatchingService::setLatticeDirectory(std::string latticeDirectory){
@@ -453,6 +478,15 @@ json PatternStructureMatchingService::compute(
         classifier.configureDxaClustering(analysis);
         computeMaximumNeighborDistanceFromPatterns(analysis);
 
+        const std::string matrixPatternName = selectedPatternIds.empty()
+            ? std::string("none")
+            : catalog->patternById(selectedPatternIds.front()).name;
+        spdlog::info(
+            "Building clusters (matrix pattern {}, max neighbor distance {:.3f})...",
+            matrixPatternName,
+            context.maximumNeighborDistance
+        );
+        phaseTimer.restart();
         PatternClusterInputAdapter clusterInputAdapter;
         clusterInputAdapter.prepare(analysis, context);
         const auto smoothedAtomDxaStates = smoothOrientationFallbackStates(*catalog, atomDxaStates);
@@ -464,6 +498,7 @@ json PatternStructureMatchingService::compute(
         normalizeReconstructedClusterGraphForExport(analysis, context);
         recomputeClusterOrientations(analysis, context);
         ReconstructedStateCanonicalizer::canonicalizeNeighborShellsToExportConvention(analysis, context);
+        logClusterSummary(analysis, _dissolveSmallClusters, phaseTimer);
 
         json selectedPatternsJson = json::array();
         for(int patternId : selectedPatternIds){
