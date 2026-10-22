@@ -11,9 +11,12 @@
 #include <volt/analysis/reconstructed_state_canonicalizer.h>
 #include <volt/analysis/reconstructed_analysis_pipeline.h>
 #include <volt/core/analysis_result.h>
+#include <volt/core/progress.h>
 #include <volt/utilities/json_utils.h>
 #include <volt/utilities/parquet_atom_writer.h>
 #include <volt/structures/crystal_topology_registry.h>
+
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
@@ -291,6 +294,28 @@ void recomputeClusterOrientations(StructureAnalysis& analysis, AnalysisContext& 
     }
 }
 
+static void appendListItem(std::string& list, const std::string& item){
+    if(!list.empty()){
+        list += ", ";
+    }
+    list += item;
+}
+
+static void logPatternCatalog(const PatternCatalog& catalog, const Stopwatch& loadTimer){
+    std::string names;
+    std::string unmatchableNames;
+    for(const CompiledPattern& pattern : catalog.patterns()){
+        appendListItem(names, pattern.name);
+        if(!pattern.supportedForLocalMatching){
+            appendListItem(unmatchableNames, pattern.name);
+        }
+    }
+    spdlog::info("Loaded {} lattice patterns in {}: {}", catalog.patterns().size(), loadTimer.elapsed(), names);
+    if(!unmatchableNames.empty()){
+        spdlog::warn("Skipping lattice patterns without a usable local matcher: {}", unmatchableNames);
+    }
+}
+
 PatternStructureMatchingService::PatternStructureMatchingService() = default;
 
 void PatternStructureMatchingService::setLatticeDirectory(std::string latticeDirectory){
@@ -340,7 +365,9 @@ json PatternStructureMatchingService::compute(
 
     try{
         setCrystalTopologySearchRoot(_referenceLatticeDirectory);
+        Stopwatch phaseTimer;
         const auto catalog = PatternCatalog::loadFromDirectory(_latticeDirectory);
+        logPatternCatalog(*catalog, phaseTimer);
         std::vector<int> selectedPatternIds;
         if(_selectedPatternsCsv.empty()){
             selectedPatternIds = catalog->defaultSelection();
