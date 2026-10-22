@@ -541,16 +541,20 @@ json PatternStructureMatchingService::compute(
             result["main_listing"] = std::move(mainListing);
             result["pattern_listing"] = std::move(patListing);
 
+            spdlog::info("Writing annotated dump, cluster graph and neighbor lattice...");
+            phaseTimer.restart();
             if(!AnalysisPipelineUtils::appendClusterOutputs(
                 frame, outputBase, annotatedDumpPath, context, analysis, result, &frameError
             )){
                 return AnalysisResult::failure(frameError);
             }
+            spdlog::info("Cluster outputs written in {}", phaseTimer.elapsed());
 
             if(!outputBase.empty()){
                 const std::string summaryPath = outputBase + "_pattern_analysis.parquet";
                 JsonUtils::writeJsonToParquet(result, summaryPath, false);
                 result["pattern_analysis"] = summaryPath;
+                spdlog::info("Summary parquet written to {}", summaryPath);
 
                 const std::string atomsPath = outputBase + "_atoms.parquet";
                 const auto patternIdAt = [&](std::size_t i){
@@ -563,6 +567,7 @@ json PatternStructureMatchingService::compute(
                 },
                 /*writePerAtomColumns=*/{}, patternIdAt,
                 /*includeStructureColumns=*/true);
+                spdlog::info("Exported atoms data to: {}", atomsPath);
             }
 
             return result;
