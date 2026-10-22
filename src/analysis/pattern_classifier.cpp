@@ -4,7 +4,9 @@
 #include <volt/analysis/nearest_neighbor_finder.h>
 #include <volt/analysis/pattern_dxa_topology_provider.h>
 #include <volt/analysis/pattern_matching_shared.h>
+#include <volt/core/progress.h>
 
+#include <spdlog/spdlog.h>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_reduce.h>
@@ -14,6 +16,7 @@
 #include <functional>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace Volt {
 
@@ -677,6 +680,19 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
     StructureContext& context = analysis.context();
     analysis.setCrystalInfoProvider(std::make_shared<PatternDxaTopologyProvider>(_catalog, _selectedPatternIds));
 
+    if(_selectedPatternIds.size() < _catalog->defaultSelection().size()){
+        std::string patternNames;
+        for(int patternId : _selectedPatternIds){
+            if(!patternNames.empty()){
+                patternNames += ", ";
+            }
+            patternNames += _catalog->patternById(patternId).name;
+        }
+        spdlog::info("Matching {} atoms against {} patterns ({})...", context.atomCount(), _selectedPatternIds.size(), patternNames);
+    }else{
+        spdlog::info("Matching {} atoms against {} patterns...", context.atomCount(), _selectedPatternIds.size());
+    }
+
     std::fill(
         context.structureTypes->dataInt(),
         context.structureTypes->dataInt() + context.structureTypes->size(),
@@ -705,10 +721,16 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
     _atomPatternIds.assign(context.atomCount(), -1);
     _atomDxaStates = std::make_shared<std::vector<PatternDxaAtomState>>(context.atomCount());
 
+    const Stopwatch neighborFinderTimer;
     NearestNeighborFinder neighborFinder(MAX_NEIGHBORS);
     if(!neighborFinder.prepare(context.positions, context.simCell)){
         throw std::runtime_error("Error preparing nearest-neighbor finder for pattern matching.");
     }
+    spdlog::info(
+        "  Nearest-neighbor search ready in {} (up to {} neighbors per atom)",
+        neighborFinderTimer.elapsed(),
+        static_cast<int>(MAX_NEIGHBORS)
+    );
 
     const std::size_t atomCount = context.atomCount();
     std::vector<int> localCounts(atomCount, 0);
@@ -735,6 +757,7 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
         localMaxDistance = std::max(localMaxDistance, match.localCutoff);
     };
 
+    ProgressReporter progress("Matching atoms", atomCount);
     context.maximumNeighborDistance = tbb::parallel_reduce(
         tbb::blocked_range<std::size_t>(0, atomCount),
         0.0,
@@ -751,6 +774,7 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
                     break;
                 }
             }
+            progress.advance(range.size());
             return localMaxDistance;
         },
         [](double lhs, double rhs) -> double {
