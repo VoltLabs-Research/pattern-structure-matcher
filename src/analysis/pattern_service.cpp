@@ -424,6 +424,9 @@ json PatternStructureMatchingService::compute(
         : outputBase + "_annotated.dump";
 
     try{
+        // Matching, cluster building, symmetry canonicalization, cluster orientations, neighbor shell
+        // reordering, the cluster outputs and the atoms parquet.
+        ProgressSteps steps({6.0, 3.0, 1.0, 1.0, 1.0, 2.0, 0.5});
         setCrystalTopologySearchRoot(_referenceLatticeDirectory);
         Stopwatch phaseTimer;
         const auto catalog = PatternCatalog::loadFromDirectory(_latticeDirectory);
@@ -468,6 +471,7 @@ json PatternStructureMatchingService::compute(
         if(matchedAtoms == 0){
             spdlog::warn("No atom matched any of the selected patterns");
         }
+        steps.next("Building clusters");
 
         if(!selectedPatternIds.empty()){
             const CompiledPattern& referencePattern = catalog->patternById(selectedPatternIds.front());
@@ -495,10 +499,14 @@ json PatternStructureMatchingService::compute(
         );
         ClusterBuilder clusterBuilder(analysis, context);
         clusterBuilder.build(_dissolveSmallClusters);
+        steps.next("Canonicalizing cluster symmetry");
         normalizeReconstructedClusterGraphForExport(analysis, context);
+        steps.next("Recomputing cluster orientations");
         recomputeClusterOrientations(analysis, context);
+        steps.next("Reordering neighbor shells");
         ReconstructedStateCanonicalizer::canonicalizeNeighborShellsToExportConvention(analysis, context);
         logClusterSummary(analysis, _dissolveSmallClusters, phaseTimer);
+        steps.next("Writing cluster outputs");
 
         json selectedPatternsJson = json::array();
         for(int patternId : selectedPatternIds){
@@ -549,6 +557,7 @@ json PatternStructureMatchingService::compute(
                 return AnalysisResult::failure(frameError);
             }
             spdlog::info("Cluster outputs written in {}", phaseTimer.elapsed());
+            steps.next("Writing the atoms table");
 
             if(!outputBase.empty()){
                 const std::string summaryPath = outputBase + "_pattern_analysis.parquet";

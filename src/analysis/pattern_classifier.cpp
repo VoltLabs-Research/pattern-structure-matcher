@@ -721,6 +721,9 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
     _atomPatternIds.assign(context.atomCount(), -1);
     _atomDxaStates = std::make_shared<std::vector<PatternDxaAtomState>>(context.atomCount());
 
+    // Indexing the atoms for the neighbor search, then matching them, which queries each atom's
+    // neighbors once per candidate pattern.
+    ProgressSteps steps({1.0, 8.0});
     const Stopwatch neighborFinderTimer;
     NearestNeighborFinder neighborFinder(MAX_NEIGHBORS);
     if(!neighborFinder.prepare(context.positions, context.simCell)){
@@ -731,6 +734,7 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
         neighborFinderTimer.elapsed(),
         static_cast<int>(MAX_NEIGHBORS)
     );
+    steps.next();
 
     const std::size_t atomCount = context.atomCount();
     std::vector<int> localCounts(atomCount, 0);
