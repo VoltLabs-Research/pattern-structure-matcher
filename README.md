@@ -5,6 +5,7 @@ Matches atomic structures against user-defined patterns and exports the reconstr
 ## Install
 
 ```bash
+npm install -g @voltstack/vpm
 vpm install @voltlabs/pattern-structure-matching
 ```
 
