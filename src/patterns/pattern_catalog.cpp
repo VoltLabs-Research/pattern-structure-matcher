@@ -1,17 +1,17 @@
 #include <volt/analysis/pattern_catalog.h>
 
-#include <spdlog/spdlog.h>
-
 #include <stdexcept>
 
 namespace Volt {
 
 PatternCatalog::PatternCatalog(
     std::filesystem::path latticeDirectory,
-    std::vector<CompiledPattern> patterns
+    std::vector<CompiledPattern> patterns,
+    std::vector<MissingPayload> missingPayloads
 ) :
     _latticeDirectory(std::move(latticeDirectory)),
-    _patterns(std::move(patterns))
+    _patterns(std::move(patterns)),
+    _missingPayloads(std::move(missingPayloads))
 {
     for(const CompiledPattern& pattern : _patterns){
         _nameToId.emplace(normalizePatternName(pattern.name), pattern.id);
@@ -27,21 +27,18 @@ std::shared_ptr<const PatternCatalog> PatternCatalog::loadFromDirectory(const st
 
     std::vector<CompiledPattern> compiledPatterns;
     compiledPatterns.reserve(sources.size());
+    std::vector<MissingPayload> missingPayloads;
 
     for(const PatternTemplateSource& source : sources){
         TemplateStructureData templateData;
         const TemplateStructureData* templatePtr = nullptr;
 
         if(!std::filesystem::exists(source.definitionPath)){
-            spdlog::warn(
-                "Lattice '{}' is missing its definition file '{}'",
-                source.name,
-                source.definitionPath.string()
-            );
+            missingPayloads.push_back({source.name, source.definitionPath.string(), false, {}});
         }else if(readTemplateStructureFile(source.definitionPath, templateData, &errorMessage)){
             templatePtr = &templateData;
         }else{
-            spdlog::warn("Skipping template payload for lattice '{}': {}", source.name, errorMessage);
+            missingPayloads.push_back({source.name, source.definitionPath.string(), true, errorMessage});
         }
 
         CompiledPattern compiled = compilePattern(source, templatePtr);
@@ -51,7 +48,9 @@ std::shared_ptr<const PatternCatalog> PatternCatalog::loadFromDirectory(const st
     }
 
     return std::shared_ptr<const PatternCatalog>(
-        new PatternCatalog(std::filesystem::path(latticeDirectory), std::move(compiledPatterns))
+        new PatternCatalog(
+            std::filesystem::path(latticeDirectory), std::move(compiledPatterns), std::move(missingPayloads)
+        )
     );
 }
 

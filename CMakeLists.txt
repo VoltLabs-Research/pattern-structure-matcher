@@ -18,6 +18,7 @@ endif()
 volt_add_plugin(pattern-structure-matching
     SOURCES
         src/analysis/pattern_service.cpp
+        src/analysis/pattern_structure_matcher_log.cpp
         src/analysis/pattern_structure_analysis.cpp
         src/analysis/pattern_cluster_input_adapter.cpp
         src/analysis/pattern_classifier.cpp

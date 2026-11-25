@@ -134,16 +134,6 @@ inline std::string normalizePatternName(std::string_view text){
     return normalized;
 }
 
-inline const char* structureTypeNameForExport(int structureType){
-    if(structureType == static_cast<int>(StructureType::OTHER)){
-        return "OTHER";
-    }
-    if(structureType >= 1000){
-        return "PATTERN";
-    }
-    return "STRUCTURE";
-}
-
 inline int syntheticStructureTypeForPattern(int patternId){
     return 1000 + patternId;
 }

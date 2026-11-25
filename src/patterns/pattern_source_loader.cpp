@@ -1,4 +1,5 @@
 #include <volt/analysis/pattern_catalog.h>
+#include <volt/analysis/reconstructed_dump_utils.h>
 
 #include <yaml-cpp/yaml.h>
 
@@ -9,12 +10,6 @@
 namespace Volt {
 
 namespace PatternSourceLoaderDetail{
-
-void setError(std::string* errorMessage, const std::string& message){
-    if(errorMessage){
-        *errorMessage = message;
-    }
-}
 
 PatternTemplateSource parsePatternSourceFile(const std::filesystem::path& filePath){
     YAML::Node document;
@@ -48,6 +43,7 @@ PatternTemplateSource parsePatternSourceFile(const std::filesystem::path& filePa
 }
 
 using namespace PatternSourceLoaderDetail;
+using AnalysisDumpUtils::setError;
 
 bool loadPatternTemplateSources(
     const std::filesystem::path& latticeDirectory,

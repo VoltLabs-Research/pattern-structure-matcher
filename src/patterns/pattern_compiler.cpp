@@ -7,19 +7,7 @@
 
 namespace Volt {
 
-constexpr double kPatternShellDistanceTolerance = 1e-6;
-
-struct PatternNeighborCandidate {
-    Vector3 vector = Vector3::Zero();
-    int species = 0;
-    double distance = 0.0;
-};
-
-struct NeighborShellRange {
-    int begin = 0;
-    int count = 0;
-    double averageDistance = 0.0;
-};
+namespace PatternCompilerDetail{
 
 bool approximatelySameDistance(double lhs, double rhs){
     const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
@@ -420,6 +408,10 @@ void compileGenericLocalMatchers(
         [](const auto& matcher){ return matcher.requiresSpecies; }
     );
 }
+
+}
+
+using namespace PatternCompilerDetail;
 
 CompiledPattern compilePattern(
     const PatternTemplateSource& source,

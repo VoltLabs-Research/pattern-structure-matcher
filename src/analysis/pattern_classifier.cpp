@@ -4,9 +4,9 @@
 #include <volt/analysis/nearest_neighbor_finder.h>
 #include <volt/analysis/pattern_dxa_topology_provider.h>
 #include <volt/analysis/pattern_matching_shared.h>
+#include <volt/analysis/pattern_structure_matcher_log.h>
 #include <volt/core/progress.h>
 
-#include <spdlog/spdlog.h>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_reduce.h>
@@ -20,40 +20,7 @@
 
 namespace Volt {
 
-bool orthonormalizeMatrix(const Matrix3& input, Matrix3& output){
-    Vector3 c0 = input.column(0);
-    Vector3 c1 = input.column(1);
-    Vector3 c2 = input.column(2);
-
-    const double l0 = c0.length();
-    if(l0 <= EPSILON){
-        return false;
-    }
-    c0 /= l0;
-
-    c1 -= c0 * c0.dot(c1);
-    const double l1 = c1.length();
-    if(l1 <= EPSILON){
-        return false;
-    }
-    c1 /= l1;
-
-    c2 -= c0 * c0.dot(c2);
-    c2 -= c1 * c1.dot(c2);
-    const double l2 = c2.length();
-    if(l2 <= EPSILON){
-        return false;
-    }
-    c2 /= l2;
-
-    output = Matrix3(c0, c1, c2);
-    if(output.determinant() < 0.0){
-        output.column(2) = -output.column(2);
-    }
-    return true;
-}
-
-bool lexicographicallyGreaterMatrix(const Matrix3& lhs, const Matrix3& rhs){
+bool PatternClassifier::lexicographicallyGreaterMatrix(const Matrix3& lhs, const Matrix3& rhs){
     constexpr double epsilon = 1e-8;
     for(int row = 0; row < 3; ++row){
         for(int column = 0; column < 3; ++column){
@@ -67,7 +34,7 @@ bool lexicographicallyGreaterMatrix(const Matrix3& lhs, const Matrix3& rhs){
     return false;
 }
 
-void permuteCanonicalToRuntimeBySymmetry(
+void PatternClassifier::permuteCanonicalToRuntimeBySymmetry(
     const std::vector<int>& canonicalToRuntime,
     const PatternSymmetryPermutation& symmetry,
     int coordinationNumber,
@@ -94,7 +61,7 @@ void permuteCanonicalToRuntimeBySymmetry(
     }
 }
 
-double orientationAssignmentError(
+double PatternClassifier::orientationAssignmentError(
     const CompiledPatternLocalMatcher& matcher,
     const NearestNeighborFinder::Query<MAX_NEIGHBORS>& query,
     const std::vector<int>& canonicalToRuntime,
@@ -123,7 +90,7 @@ double orientationAssignmentError(
     return error;
 }
 
-bool computeMatchOrientation(
+bool PatternClassifier::computeMatchOrientation(
     const CompiledPatternLocalMatcher& matcher,
     const NearestNeighborFinder::Query<MAX_NEIGHBORS>& query,
     const std::vector<int>& canonicalToRuntime,
@@ -158,14 +125,10 @@ bool computeMatchOrientation(
     }
 
     const Matrix3 rawOrientation = Matrix3(orientationW * orientationVInverse);
-    return orthonormalizeMatrix(rawOrientation, outOrientation);
+    return rawOrientation.orthonormalized(outOrientation);
 }
 
-double matrixTrace(const Matrix3& matrix){
-    return matrix(0, 0) + matrix(1, 1) + matrix(2, 2);
-}
-
-bool reduceOrientationToFundamentalZone(
+bool PatternClassifier::reduceOrientationToFundamentalZone(
     const CompiledPatternLocalMatcher& matcher,
     const NearestNeighborFinder::Query<MAX_NEIGHBORS>& query,
     std::vector<int>& inOutCanonicalToRuntime,
@@ -177,7 +140,7 @@ bool reduceOrientationToFundamentalZone(
 
     std::vector<int> bestCanonicalToRuntime = inOutCanonicalToRuntime;
     Matrix3 bestOrientation = inOutOrientation;
-    double bestTrace = matrixTrace(inOutOrientation);
+    double bestTrace = inOutOrientation.trace();
     double bestError = orientationAssignmentError(
         matcher,
         query,
@@ -205,7 +168,7 @@ bool reduceOrientationToFundamentalZone(
             continue;
         }
 
-        const double candidateTrace = matrixTrace(candidateOrientation);
+        const double candidateTrace = candidateOrientation.trace();
         const double candidateError = orientationAssignmentError(
             matcher,
             query,
@@ -238,7 +201,7 @@ bool reduceOrientationToFundamentalZone(
     return changed;
 }
 
-bool assignBestOrientationFallbackPermutation(
+bool PatternClassifier::assignBestOrientationFallbackPermutation(
     const CompiledPatternLocalMatcher& matcher,
     const std::vector<PatternCnaSignature>& runtimeSignatures,
     const NeighborBondArray& runtimeNeighborArray,
@@ -337,7 +300,7 @@ bool assignBestOrientationFallbackPermutation(
     return true;
 }
 
-bool matchGenericLocalMatcherImpl(
+bool PatternClassifier::matchGenericLocalMatcherImpl(
     const CompiledPattern& pattern,
     const CompiledPatternLocalMatcher& matcher,
     int localMatcherIndex,
@@ -573,7 +536,7 @@ bool matchGenericLocalMatcherImpl(
     return true;
 }
 
-bool matchGenericLocalMatcher(
+bool PatternClassifier::matchGenericLocalMatcher(
     const CompiledPattern& pattern,
     const CompiledPatternLocalMatcher& matcher,
     int localMatcherIndex,
@@ -612,7 +575,7 @@ bool matchGenericLocalMatcher(
     );
 }
 
-bool matchPatternAtom(
+bool PatternClassifier::matchPatternAtom(
     const CompiledPattern& pattern,
     const NearestNeighborFinder& neighFinder,
     int atomIndex,
@@ -635,7 +598,7 @@ bool matchPatternAtom(
     return false;
 }
 
-int patternSelectionPriority(const CompiledPattern& pattern){
+int PatternClassifier::patternSelectionPriority(const CompiledPattern& pattern){
     if(pattern.requiresAtomTypes){
         return 1;
     }
@@ -658,6 +621,7 @@ void PatternClassifier::setSelectedPatternIds(std::vector<int> selectedPatternId
 }
 
 void PatternClassifier::classify(StructureAnalysis& analysis){
+    PatternStructureMatcherLog log;
     if(!_catalog){
         throw std::runtime_error("Pattern classifier catalog is not configured");
     }
@@ -679,19 +643,6 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
 
     StructureContext& context = analysis.context();
     analysis.setCrystalInfoProvider(std::make_shared<PatternDxaTopologyProvider>(_catalog, _selectedPatternIds));
-
-    if(_selectedPatternIds.size() < _catalog->defaultSelection().size()){
-        std::string patternNames;
-        for(int patternId : _selectedPatternIds){
-            if(!patternNames.empty()){
-                patternNames += ", ";
-            }
-            patternNames += _catalog->patternById(patternId).name;
-        }
-        spdlog::info("Matching {} atoms against {} patterns ({})...", context.atomCount(), _selectedPatternIds.size(), patternNames);
-    }else{
-        spdlog::info("Matching {} atoms against {} patterns...", context.atomCount(), _selectedPatternIds.size());
-    }
 
     std::fill(
         context.structureTypes->dataInt(),
@@ -721,19 +672,15 @@ void PatternClassifier::classify(StructureAnalysis& analysis){
     _atomPatternIds.assign(context.atomCount(), -1);
     _atomDxaStates = std::make_shared<std::vector<PatternDxaAtomState>>(context.atomCount());
 
-    // Indexing the atoms for the neighbor search, then matching them, which queries each atom's
-    // neighbors once per candidate pattern.
-    ProgressSteps steps({1.0, 8.0});
-    const Stopwatch neighborFinderTimer;
+    ProgressSteps steps({
+        {"Indexing the atoms for the neighbor search", 1.0},
+        {"Matching atoms", 8.0},
+    });
     NearestNeighborFinder neighborFinder(MAX_NEIGHBORS);
     if(!neighborFinder.prepare(context.positions, context.simCell)){
         throw std::runtime_error("Error preparing nearest-neighbor finder for pattern matching.");
     }
-    spdlog::info(
-        "  Nearest-neighbor search ready in {} (up to {} neighbors per atom)",
-        neighborFinderTimer.elapsed(),
-        static_cast<int>(MAX_NEIGHBORS)
-    );
+    log.dump(neighborFinder);
     steps.next();
 
     const std::size_t atomCount = context.atomCount();

@@ -8,63 +8,31 @@
 #include <volt/analysis/pattern_dxa_topology_provider.h>
 #include <volt/analysis/orientation_cluster_rule_provider.h>
 #include <volt/analysis/pattern_structure_analysis.h>
+#include <volt/analysis/pattern_structure_matcher_log.h>
 #include <volt/analysis/reconstructed_state_canonicalizer.h>
 #include <volt/analysis/reconstructed_analysis_pipeline.h>
+#include <volt/analysis/structure_identification_export.h>
 #include <volt/core/analysis_result.h>
 #include <volt/core/progress.h>
+#include <volt/cli/common.h>
 #include <volt/utilities/json_utils.h>
 #include <volt/utilities/parquet_atom_writer.h>
 #include <volt/structures/crystal_topology_registry.h>
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
-#include <cctype>
-#include <cstdio>
 #include <map>
-#include <numeric>
 #include <unordered_set>
 
 namespace Volt {
 
-std::string trimAscii(std::string_view value){
-    std::size_t first = 0;
-    while(first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))){
-        ++first;
-    }
-    std::size_t last = value.size();
-    while(last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))){
-        --last;
-    }
-    return std::string(value.substr(first, last - first));
-}
-
-std::vector<std::string> splitPatternCsv(std::string_view csv){
-    std::vector<std::string> values;
-    std::size_t start = 0;
-    while(start <= csv.size()){
-        const std::size_t comma = csv.find(',', start);
-        const std::size_t end = comma == std::string_view::npos ? csv.size() : comma;
-        std::string token = trimAscii(csv.substr(start, end - start));
-        if(!token.empty()){
-            values.push_back(std::move(token));
-        }
-        if(comma == std::string_view::npos){
-            break;
-        }
-        start = comma + 1;
-    }
-    return values;
-}
-
-bool resolveSelectedPatternIds(
+bool PatternStructureMatchingService::resolveSelectedPatternIds(
     const PatternCatalog& catalog,
     const std::string& csv,
     std::vector<int>& outPatternIds,
     std::string& outError
 ){
     outPatternIds.clear();
-    const auto tokens = splitPatternCsv(csv);
+    const auto tokens = CLI::splitList(csv, ',');
     if(tokens.empty()){
         outError = "--patterns was provided but no valid pattern names were found.";
         return false;
@@ -99,7 +67,7 @@ bool resolveSelectedPatternIds(
 }
 
 
-std::shared_ptr<std::vector<OrientationClusterAtomState>> buildOrientationClusterStates(
+std::shared_ptr<std::vector<OrientationClusterAtomState>> PatternStructureMatchingService::buildOrientationClusterStates(
     const std::shared_ptr<const std::vector<PatternDxaAtomState>>& atomStates
 ){
     if(!atomStates){
@@ -117,40 +85,7 @@ std::shared_ptr<std::vector<OrientationClusterAtomState>> buildOrientationCluste
     return states;
 }
 
-bool orthonormalizeOrientationMatrix(const Matrix3& input, Matrix3& output){
-    Vector3 c0 = input.column(0);
-    Vector3 c1 = input.column(1);
-    Vector3 c2 = input.column(2);
-
-    const double l0 = c0.length();
-    if(l0 <= EPSILON){
-        return false;
-    }
-    c0 /= l0;
-
-    c1 -= c0 * c0.dot(c1);
-    const double l1 = c1.length();
-    if(l1 <= EPSILON){
-        return false;
-    }
-    c1 /= l1;
-
-    c2 -= c0 * c0.dot(c2);
-    c2 -= c1 * c1.dot(c2);
-    const double l2 = c2.length();
-    if(l2 <= EPSILON){
-        return false;
-    }
-    c2 /= l2;
-
-    output = Matrix3(c0, c1, c2);
-    if(output.determinant() < 0.0){
-        output.column(2) = -output.column(2);
-    }
-    return true;
-}
-
-std::shared_ptr<const std::vector<PatternDxaAtomState>> smoothOrientationFallbackStates(
+std::shared_ptr<const std::vector<PatternDxaAtomState>> PatternStructureMatchingService::smoothOrientationFallbackStates(
     const PatternCatalog& catalog,
     const std::shared_ptr<const std::vector<PatternDxaAtomState>>& atomStates
 ){
@@ -221,7 +156,7 @@ std::shared_ptr<const std::vector<PatternDxaAtomState>> smoothOrientationFallbac
             }
 
             Matrix3 smoothedOrientation;
-            if(!orthonormalizeOrientationMatrix(accumulated, smoothedOrientation)){
+            if(!accumulated.orthonormalized(smoothedOrientation)){
                 continue;
             }
 
@@ -235,7 +170,7 @@ std::shared_ptr<const std::vector<PatternDxaAtomState>> smoothOrientationFallbac
     return current;
 }
 
-void recomputeClusterOrientations(StructureAnalysis& analysis, AnalysisContext& context){
+void PatternStructureMatchingService::recomputeClusterOrientations(StructureAnalysis& analysis, AnalysisContext& context){
     // Each cluster rescans every atom, so with many clusters this loop can run for seconds.
     const auto& clusters = analysis.clusterGraph().clusters();
     ProgressReporter progress("Recomputing cluster orientations", clusters.size());
@@ -301,81 +236,6 @@ void recomputeClusterOrientations(StructureAnalysis& analysis, AnalysisContext& 
     }
 }
 
-static void appendListItem(std::string& list, const std::string& item){
-    if(!list.empty()){
-        list += ", ";
-    }
-    list += item;
-}
-
-static void logPatternCatalog(const PatternCatalog& catalog, const Stopwatch& loadTimer){
-    std::string names;
-    std::string unmatchableNames;
-    for(const CompiledPattern& pattern : catalog.patterns()){
-        appendListItem(names, pattern.name);
-        if(!pattern.supportedForLocalMatching){
-            appendListItem(unmatchableNames, pattern.name);
-        }
-    }
-    spdlog::info("Loaded {} lattice patterns in {}: {}", catalog.patterns().size(), loadTimer.elapsed(), names);
-    if(!unmatchableNames.empty()){
-        spdlog::warn("Skipping lattice patterns without a usable local matcher: {}", unmatchableNames);
-    }
-}
-
-// "fcc 851234 (81.2%)" per matched pattern, most common first, then the unmatched atoms as Other.
-static std::string describeStructureCounts(
-    const PatternCatalog& catalog,
-    const std::vector<int>& patternCounts,
-    std::size_t atomCount,
-    std::size_t matchedAtoms
-){
-    std::vector<int> matchedPatternIds;
-    for(const CompiledPattern& pattern : catalog.patterns()){
-        if(patternCounts[static_cast<std::size_t>(pattern.id)] > 0){
-            matchedPatternIds.push_back(pattern.id);
-        }
-    }
-    std::stable_sort(matchedPatternIds.begin(), matchedPatternIds.end(), [&](int lhs, int rhs){
-        return patternCounts[static_cast<std::size_t>(lhs)] > patternCounts[static_cast<std::size_t>(rhs)];
-    });
-
-    std::string text;
-    const auto appendCount = [&](const std::string& name, std::size_t count){
-        char share[48];
-        std::snprintf(share, sizeof(share), " %zu (%.1f%%)", count, percentOf(count, atomCount));
-        appendListItem(text, name + share);
-    };
-    for(int patternId : matchedPatternIds){
-        appendCount(
-            catalog.patternById(patternId).name,
-            static_cast<std::size_t>(patternCounts[static_cast<std::size_t>(patternId)])
-        );
-    }
-    appendCount("Other", atomCount - matchedAtoms);
-    return text;
-}
-
-static void logClusterSummary(const StructureAnalysis& analysis, bool dissolveSmallClusters, const Stopwatch& clusterTimer){
-    const auto& clusters = analysis.clusterGraph().clusters();
-    // The cluster graph always holds the null cluster 0.
-    const std::size_t clusterCount = clusters.empty() ? 0 : clusters.size() - 1;
-    if(dissolveSmallClusters){
-        const auto dissolvedClusters = std::count_if(clusters.begin(), clusters.end(), [](const Cluster* cluster){
-            return cluster && cluster->id != 0 && cluster->structure == LATTICE_OTHER;
-        });
-        spdlog::info(
-            "Built {} clusters in {} ({} with fewer than {} atoms dissolved)",
-            clusterCount,
-            clusterTimer.elapsed(),
-            dissolvedClusters,
-            ClusterBuilder::kDefaultSmallClusterSize
-        );
-    }else{
-        spdlog::info("Built {} clusters in {}", clusterCount, clusterTimer.elapsed());
-    }
-}
-
 PatternStructureMatchingService::PatternStructureMatchingService() = default;
 
 void PatternStructureMatchingService::setLatticeDirectory(std::string latticeDirectory){
@@ -424,13 +284,19 @@ json PatternStructureMatchingService::compute(
         : outputBase + "_annotated.dump";
 
     try{
-        // Matching, cluster building, symmetry canonicalization, cluster orientations, neighbor shell
-        // reordering, the cluster outputs and the atoms parquet.
-        ProgressSteps steps({6.0, 3.0, 1.0, 1.0, 1.0, 2.0, 0.5});
+        PatternStructureMatcherLog log;
+        ProgressSteps steps({
+            {"Matching atoms against patterns", 6.0},
+            {"Building clusters", 3.0},
+            {"Canonicalizing cluster symmetry", 1.0},
+            {"Recomputing cluster orientations", 1.0},
+            {"Reordering neighbor shells", 1.0},
+            {"Writing cluster outputs", 2.0},
+            {"Writing the atoms table", 0.5},
+        });
         setCrystalTopologySearchRoot(_referenceLatticeDirectory);
-        Stopwatch phaseTimer;
         const auto catalog = PatternCatalog::loadFromDirectory(_latticeDirectory);
-        logPatternCatalog(*catalog, phaseTimer);
+        log.dump(*catalog);
         std::vector<int> selectedPatternIds;
         if(_selectedPatternsCsv.empty()){
             selectedPatternIds = catalog->defaultSelection();
@@ -448,8 +314,8 @@ json PatternStructureMatchingService::compute(
         PatternClassifier classifier(catalog);
         classifier.setAtomTypes(frame.types.empty() ? nullptr : &frame.types);
         classifier.setSelectedPatternIds(selectedPatternIds);
-        phaseTimer.restart();
         classifier.classify(analysis);
+        log.dump(classifier);
         selectedPatternIds = classifier.selectedPatternIds();
         atomPatternIds = classifier.atomPatternIds();
         const auto atomDxaStates = classifier.atomDxaStates();
@@ -458,20 +324,7 @@ json PatternStructureMatchingService::compute(
         for(int pid : atomPatternIds){
             if(pid >= 0 && pid < static_cast<int>(patCounts.size())) patCounts[pid]++;
         }
-        const std::size_t atomCount = context.atomCount();
-        const std::size_t matchedAtoms = std::accumulate(patCounts.begin(), patCounts.end(), std::size_t{0});
-        spdlog::info(
-            "Matched {} of {} atoms ({:.1f}%) in {}",
-            matchedAtoms,
-            atomCount,
-            percentOf(matchedAtoms, atomCount),
-            phaseTimer.elapsed()
-        );
-        spdlog::info("Structure types: {}", describeStructureCounts(*catalog, patCounts, atomCount, matchedAtoms));
-        if(matchedAtoms == 0){
-            spdlog::warn("No atom matched any of the selected patterns");
-        }
-        steps.next("Building clusters");
+        steps.next();
 
         if(!selectedPatternIds.empty()){
             const CompiledPattern& referencePattern = catalog->patternById(selectedPatternIds.front());
@@ -482,15 +335,6 @@ json PatternStructureMatchingService::compute(
         classifier.configureDxaClustering(analysis);
         computeMaximumNeighborDistanceFromPatterns(analysis);
 
-        const std::string matrixPatternName = selectedPatternIds.empty()
-            ? std::string("none")
-            : catalog->patternById(selectedPatternIds.front()).name;
-        spdlog::info(
-            "Building clusters (matrix pattern {}, max neighbor distance {:.3f})...",
-            matrixPatternName,
-            context.maximumNeighborDistance
-        );
-        phaseTimer.restart();
         PatternClusterInputAdapter clusterInputAdapter;
         clusterInputAdapter.prepare(analysis, context);
         const auto smoothedAtomDxaStates = smoothOrientationFallbackStates(*catalog, atomDxaStates);
@@ -498,15 +342,15 @@ json PatternStructureMatchingService::compute(
             std::make_shared<OrientationClusterRuleProvider>(buildOrientationClusterStates(smoothedAtomDxaStates))
         );
         ClusterBuilder clusterBuilder(analysis, context);
-        clusterBuilder.build(_dissolveSmallClusters);
-        steps.next("Canonicalizing cluster symmetry");
+        const BuiltClusters clusters = clusterBuilder.build(_dissolveSmallClusters);
+        steps.next();
         normalizeReconstructedClusterGraphForExport(analysis, context);
-        steps.next("Recomputing cluster orientations");
+        steps.next();
         recomputeClusterOrientations(analysis, context);
-        steps.next("Reordering neighbor shells");
+        steps.next();
         ReconstructedStateCanonicalizer::canonicalizeNeighborShellsToExportConvention(analysis, context);
-        logClusterSummary(analysis, _dissolveSmallClusters, phaseTimer);
-        steps.next("Writing cluster outputs");
+        log.dump(clusters);
+        steps.next();
 
         json selectedPatternsJson = json::array();
         for(int patternId : selectedPatternIds){
@@ -549,34 +393,30 @@ json PatternStructureMatchingService::compute(
             result["main_listing"] = std::move(mainListing);
             result["pattern_listing"] = std::move(patListing);
 
-            spdlog::info("Writing annotated dump, cluster graph and neighbor lattice...");
-            phaseTimer.restart();
-            if(!AnalysisPipelineUtils::appendClusterOutputs(
+            const auto clusterOutputs = AnalysisPipelineUtils::appendClusterOutputs(
                 frame, outputBase, annotatedDumpPath, context, analysis, result, &frameError
-            )){
+            );
+            if(!clusterOutputs){
                 return AnalysisResult::failure(frameError);
             }
-            spdlog::info("Cluster outputs written in {}", phaseTimer.elapsed());
-            steps.next("Writing the atoms table");
+            log.dump(clusterOutputs);
+            steps.next();
 
             if(!outputBase.empty()){
-                const std::string summaryPath = outputBase + "_pattern_analysis.parquet";
-                JsonUtils::writeJsonToParquet(result, summaryPath, false);
-                result["pattern_analysis"] = summaryPath;
-                spdlog::info("Summary parquet written to {}", summaryPath);
+                const auto summaryTable = JsonUtils::writeSummaryTable(result, outputBase, "pattern_analysis");
+                result["pattern_analysis"] = summaryTable.path;
+                log.dump(summaryTable);
 
-                const std::string atomsPath = outputBase + "_atoms.parquet";
                 const auto patternIdAt = [&](std::size_t i){
                     const int pid = i < atomPatternIds.size() ? atomPatternIds[i] : -1;
                     return (pid >= 0 && pid < static_cast<int>(catalog->patterns().size())) ? pid : -1;
                 };
-                streamAtomsToParquet(atomsPath, frame, [&](std::size_t i){
+                log.dump(writeAtomsTable(outputBase, frame, [&](std::size_t i){
                     const int pid = patternIdAt(i);
                     return pid >= 0 ? catalog->patternById(pid).name : std::string("OTHER");
                 },
                 /*writePerAtomColumns=*/{}, patternIdAt,
-                /*includeStructureColumns=*/true);
-                spdlog::info("Exported atoms data to: {}", atomsPath);
+                /*includeStructureColumns=*/true));
             }
 
             return result;

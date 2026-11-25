@@ -1,4 +1,6 @@
 #include <volt/analysis/pattern_catalog.h>
+#include <volt/analysis/reconstructed_dump_utils.h>
+#include <volt/structures/crystal_topology_registry.h>
 
 #include <yaml-cpp/yaml.h>
 
@@ -6,28 +8,8 @@
 
 namespace Volt {
 
-namespace TemplateStructureLoaderDetail{
-
-Vector3 parseVector3(const YAML::Node& value){
-    if(!value || !value.IsSequence() || value.size() != 3){
-        throw std::runtime_error("Expected a 3-component vector.");
-    }
-    return Vector3(
-        value[0].as<double>(),
-        value[1].as<double>(),
-        value[2].as<double>()
-    );
-}
-
-void setError(std::string* errorMessage, const std::string& message){
-    if(errorMessage){
-        *errorMessage = message;
-    }
-}
-
-}
-
-using namespace TemplateStructureLoaderDetail;
+using AnalysisDumpUtils::setError;
+using CrystalTopologyRegistryDetail::parseVector3;
 
 bool readTemplateStructureFile(
     const std::filesystem::path& filePath,

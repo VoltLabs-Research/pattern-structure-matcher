@@ -4,7 +4,9 @@
 
 namespace Volt {
 
-static bool assignGenericCnaPermutationRecursive(
+namespace PatternMatchingDetail{
+
+bool assignGenericCnaPermutationRecursive(
     const CompiledPatternLocalMatcher& matcher,
     const std::vector<PatternCnaSignature>& runtimeSignatures,
     const NeighborBondArray& runtimeNeighborArray,
@@ -63,9 +65,9 @@ static bool assignGenericCnaPermutationRecursive(
     return false;
 }
 
-static bool atomTypesAvailable(const std::vector<int>* atomTypes, std::size_t atomCount){
-    return atomTypes != nullptr && atomTypes->size() >= atomCount;
 }
+
+using namespace PatternMatchingDetail;
 
 PatternCnaSignature computePatternCnaSignature(
     const NeighborBondArray& neighborArray,
